@@ -3,16 +3,16 @@ from torch import nn
 
 
 class PosEmbed2d(nn.Module):
-    def __init__(self, num_frequencies: int, eps: float = 1e-6):
+    def __init__(self, num_high_freq: int, num_low_freq: int, eps: float = 1e-6):
         super().__init__()
         self.eps = float(eps)
-        self.num_frequencies = int(num_frequencies)
+        self.num_frequencies = num_high_freq + num_low_freq
 
-        powers = torch.arange(num_frequencies, dtype=torch.float32)  # [0, 1, ...]
-        frequencies = torch.pi * (2.0 ** powers)  # [pi, 2pi, 4pi, ...]
+        powers = torch.arange(self.num_frequencies, dtype=torch.float32) - num_low_freq  # [0, 1, ...]
+        frequencies = torch.pi * (2.0 ** powers)  # [..., pi/4, pi/2, pi, 2pi, 4pi, ...]
         self.register_buffer("frequencies", frequencies, persistent=True)
 
-        self.norm = nn.GroupNorm(1, 4 * num_frequencies)
+        self.norm = nn.GroupNorm(1, 4 * self.num_frequencies)
 
     def _make_grid(self, h: int, w: int, relative: bool):
         if relative:
@@ -54,63 +54,17 @@ class PosEmbed2d(nn.Module):
         return positional_embedding
 
 
-# class AbsPosEmbed(nn.Module):
-#     def __init__(self, num_frequencies: int, eps: float = 1e-6):
-#         super().__init__()
-#         self.eps = float(eps)
-#         self.num_frequencies = int(num_frequencies)
-#
-#         powers = torch.arange(num_frequencies, dtype=torch.float32)  # [0, 1, ...]
-#         frequencies = torch.pi * (2.0 ** powers)  # [pi, 2pi, 4pi, ...]
-#         self.register_buffer("frequencies", frequencies, persistent=True)
-#
-#         self.norm = nn.GroupNorm(1, 4 * num_frequencies)
-#
-#     def _make_grid(self, h: int, w: int):
-#         x_min, x_max, y_min, y_max = -0.5, 0.5, -0.5, 0.5
-#
-#         x_coordinates = torch.linspace(x_min + self.eps, x_max - self.eps, steps=w)
-#         y_coordinates = torch.linspace(y_min + self.eps, y_max - self.eps, steps=h)
-#
-#         yy, xx = torch.meshgrid(y_coordinates, x_coordinates, indexing="ij")
-#         grid = torch.stack([xx, yy], dim=0)
-#         return grid
-#
-#     def forward(self, h: int, w: int) -> torch.Tensor:
-#         grid = self._make_grid(h, w).to(self.frequencies)
-#
-#         grid_unsqueezed = grid.unsqueeze(-1)  # [2, h, w, 1]
-#         frequencies = self.frequencies.view(1, 1, 1, -1)  # [1, 1, 1, F]
-#         tproj = grid_unsqueezed * frequencies  # [2, h, w, F]
-#
-#         sin_feat = torch.sin(tproj)
-#         cos_feat = torch.cos(tproj)
-#
-#         # now rearrange into channel-first format expected by conv: [1, 4F, h, w]
-#         # sin_feat shape [2, h, w, F] -> permute -> [2, F, h, w] -> reshape [2F, h, w]
-#         sin_ch = sin_feat.permute(0, 3, 1, 2).contiguous().view(2 * self.num_frequencies, h, w)
-#         cos_ch = cos_feat.permute(0, 3, 1, 2).contiguous().view(2 * self.num_frequencies, h, w)
-#         fourier_ch = torch.cat([sin_ch, cos_ch], dim=0).unsqueeze(0)  # [1, 4F, h, w]
-#         positional_embedding = self.norm(fourier_ch).squeeze(0)  # [4F, h, w]
-#
-#         return positional_embedding
-
-
 class ContTimeEmbed(nn.Module):
-    def __init__(self, num_frequencies: int, film_dim: int, eps: float = 1e-6):
+    def __init__(self, num_high_freq: int, num_low_freq: int, eps: float = 1e-6):
         super().__init__()
         self.eps = float(eps)
+        self.num_frequencies = num_high_freq + num_low_freq
 
-        powers = torch.arange(num_frequencies, dtype=torch.float32)
+        powers = torch.arange(self.num_frequencies, dtype=torch.float32) - num_low_freq
         frequencies = torch.pi * (2.0 ** powers)  # [pi, 2pi, 4pi, ...]
         self.register_buffer("frequencies", frequencies, persistent=True)
 
-        self.norm = nn.LayerNorm(2 * num_frequencies)
-
-        # self.proj = nn.Sequential(
-        #     nn.LayerNorm(2 * num_frequencies),
-        #     nn.Linear(2 * num_frequencies, film_dim),
-        # )
+        self.norm = nn.LayerNorm(2 * self.num_frequencies)
 
     def forward(self, alpha_bar: torch.Tensor) -> torch.Tensor:
         alpha_mapped = alpha_bar * (1 - 2 * self.eps) - (0.5 - self.eps)
@@ -288,8 +242,10 @@ class SIID(nn.Module):
             enc_blocks: int,  # number of encoder blocks (no cross attention)
             dec_blocks: int,  # number of decoder blocks (yes cross attention)
             num_heads: int,  # num heads in each block, d_channels must be divisible here
-            pos_freq: int,  # number of frequencies for positioning
-            time_freq: int,  # number of frequencies for time, frequencies increasing (assume that 1k steps is the most)
+            pos_high_freq: int,
+            pos_low_freq: int,
+            time_high_freq: int,
+            time_low_freq: int,
             film_dim: int,  # dimension that the base film vector sits in, then gets turned to d channels
             cross_dropout: float = 0.0,
             axial_dropout: float = 0.0,
@@ -300,19 +256,14 @@ class SIID(nn.Module):
     ):
         super().__init__()
         self.d_channels = int(d_channels)
+        total_pos_freq = pos_low_freq + pos_high_freq
+        total_time_freq = time_low_freq + time_high_freq
 
         self.reduction_size = rescale_factor
         latent_img_channels = c_channels * rescale_factor ** 2
 
-        self.film_proj = nn.Sequential(
-            nn.Linear(time_freq * 2, film_dim),
-            nn.SiLU(),
-            nn.Linear(film_dim, film_dim),
-            nn.SiLU()
-        )
-
         self.pixel_unshuffle = nn.PixelUnshuffle(rescale_factor)
-        self.proj_to_latent = nn.Conv2d(pos_freq * 4 * 2 + latent_img_channels, d_channels, 1)
+        self.proj_to_latent = nn.Conv2d(total_pos_freq * 4 * 2 + latent_img_channels, d_channels, 1)
 
         self.latent_to_epsilon = nn.Sequential(
             nn.Conv2d(d_channels, latent_img_channels, 1),
@@ -321,12 +272,14 @@ class SIID(nn.Module):
         nn.init.zeros_(self.latent_to_epsilon[-2].weight)
         nn.init.zeros_(self.latent_to_epsilon[-2].bias)
 
-        # self.rel_pos_embed = PosEmbed2d(pos_freq)  # added to latent
-        # self.abs_pos_embed = AbsPosEmbed(pos_freq)  # added to latent
-
-        self.pos_embed = PosEmbed2d(pos_freq)
-
-        self.time_embed = ContTimeEmbed(time_freq, film_dim)  # creates film vector
+        self.pos_embed = PosEmbed2d(pos_high_freq, pos_low_freq)
+        self.time_embed = ContTimeEmbed(time_high_freq, time_low_freq)
+        self.film_proj = nn.Sequential(
+            nn.Linear(total_time_freq * 2, film_dim),
+            nn.SiLU(),
+            nn.Linear(film_dim, film_dim),
+            nn.SiLU()
+        )
 
         self.text_token_length = text_token_length
         self.text_proj = nn.Linear(in_features=text_cond_dim, out_features=text_token_length * d_channels)

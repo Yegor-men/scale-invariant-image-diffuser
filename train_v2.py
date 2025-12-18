@@ -54,25 +54,27 @@ from modules.count_params import count_parameters
 
 model = SIID(
     c_channels=1,
-    d_channels=256,
+    d_channels=512,
     rescale_factor=8,
     enc_blocks=8,
     dec_blocks=8,
-    num_heads=4,
-    pos_freq=3,
-    time_freq=7,
-    film_dim=256,
+    num_heads=8,
+    pos_high_freq=2,
+    pos_low_freq=3,
+    time_high_freq=7,
+    time_low_freq=3,
+    film_dim=1024,
     cross_dropout=0.05,
     axial_dropout=0.05,
     ffn_dropout=0.1,
     text_cond_dim=10,
     text_token_length=1,
-    share_weights=True,
+    share_weights=False,
 ).to(device)
 
 # from save_load_model import load_checkpoint_into
 #
-# model = load_checkpoint_into(model, "models/enc_dec_model_foo.pt", "cuda")
+# model = load_checkpoint_into(model, "models/baseline_0.02342.pt", "cuda")
 # model.to(device)
 # model.eval()
 import copy
