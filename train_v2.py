@@ -60,7 +60,6 @@ model = SIID(
     dec_blocks=8,
     num_heads=4,
     pos_freq=3,
-    size_freq=3,
     time_freq=7,
     film_dim=256,
     cross_dropout=0.05,
@@ -68,7 +67,7 @@ model = SIID(
     ffn_dropout=0.1,
     text_cond_dim=10,
     text_token_length=1,
-    share_weights=False,
+    share_weights=True,
 ).to(device)
 
 # from save_load_model import load_checkpoint_into
