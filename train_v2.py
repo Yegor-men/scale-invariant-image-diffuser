@@ -59,8 +59,8 @@ model = SIID(
     enc_blocks=8,
     dec_blocks=8,
     num_heads=4,
-    pos_freq=2,
-    size_freq=2,
+    pos_freq=3,
+    size_freq=3,
     time_freq=7,
     film_dim=256,
     cross_dropout=0.1,
@@ -243,8 +243,8 @@ for E in range(num_epochs):
         with torch.no_grad():
             rescaled_image, (h_new, w_new) = random_batch_rescale(
                 orig_image,
-                min_size=48,
-                max_size=80,
+                min_size=6 * 8,
+                max_size=10 * 8,
                 step_multiple=8,
                 ensure_divisible_by=8,
                 keep_square=True,
@@ -301,18 +301,18 @@ for E in range(num_epochs):
             loss = nn.functional.mse_loss(eps_null, eps) + nn.functional.mse_loss(eps_pos, eps)
             test_loss += loss.item()
 
-            if i == 0:
-                fixed_noisy = torch.clamp(((noisy_image + 1) / 2), min=0.0, max=1.0)
-                fixed_null = torch.clamp(((eps_null + 1) / 2), min=0.0, max=1.0)
-                fixed_pos = torch.clamp(((eps_pos + 1) / 2), min=0.0, max=1.0)
-                fixed_eps = torch.clamp(((eps + 1) / 2), min=0.0, max=1.0)
-
-                render_image(fixed_noisy, title=f"E{E} - Noisy Image")
-                render_image(fixed_null, title=f"E{E} - Eps Null")
-                render_image(fixed_pos, title=f"E{E} - Eps Pos")
-                render_image(fixed_eps, title=f"E{E} - Epsilon")
-                render_image((eps_null - eps) ** 2, title=f"E{E} - Eps Null MSE")
-                render_image((eps_pos - eps) ** 2, title=f"E{E} - Eps Pos MSE")
+            # if i == 0:
+            #     fixed_noisy = torch.clamp(((noisy_image + 1) / 2), min=0.0, max=1.0)
+            #     fixed_null = torch.clamp(((eps_null + 1) / 2), min=0.0, max=1.0)
+            #     fixed_pos = torch.clamp(((eps_pos + 1) / 2), min=0.0, max=1.0)
+            #     fixed_eps = torch.clamp(((eps + 1) / 2), min=0.0, max=1.0)
+            #
+            #     render_image(fixed_noisy, title=f"E{E} - Noisy Image")
+            #     render_image(fixed_null, title=f"E{E} - Eps Null")
+            #     render_image(fixed_pos, title=f"E{E} - Eps Pos")
+            #     render_image(fixed_eps, title=f"E{E} - Epsilon")
+            #     render_image((eps_null - eps) ** 2, title=f"E{E} - Eps Null MSE")
+            #     render_image((eps_pos - eps) ** 2, title=f"E{E} - Eps Pos MSE")
 
     test_loss /= len(test_dloader)
     test_losses.append(test_loss)
@@ -379,9 +379,9 @@ for E in range(num_epochs):
         for i in range(10):
             positive_text_conditioning[i * 10:(i + 1) * 10, i] = 1.0
 
-        small_noise = torch.randn(100, 1, 48, 48).to(device)
-        medium_noise = torch.randn(100, 1, 64, 64).to(device)
-        big_noise = torch.randn(100, 1, 80, 80).to(device)
+        small_noise = torch.randn(100, 1, 6 * 8, 6 * 8).to(device)
+        medium_noise = torch.randn(100, 1, 8 * 8, 8 * 8).to(device)
+        big_noise = torch.randn(100, 1, 10 * 8, 10 * 8).to(device)
 
         final_x0_hat, final_x = run_ddim_visualization(
             model=ema_model,
