@@ -128,7 +128,7 @@ train_dloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 test_dloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=True)
 
 peak_lr = 1e-3
-final_lr = 1e-4
+final_lr = 1e-5
 total_steps = num_epochs * len(train_dloader)
 warmup_steps = len(train_dloader)
 
@@ -267,7 +267,7 @@ for E in range(num_epochs):
         eps_null, eps_pos, eps_neg = model(noisy_image, alpha_bar, pos_cond)
         loss = nn.functional.mse_loss(eps_null, eps) + nn.functional.mse_loss(eps_pos, eps)
         train_loss += loss.item()
-        (loss * batch_size).backward()
+        loss.backward()
         optimizer.step()
         scheduler.step()
         optimizer.zero_grad()
