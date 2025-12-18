@@ -48,7 +48,7 @@ class RelPosEmbed2D(nn.Module):
         # sin_feat shape [2, h, w, F] -> permute -> [2, F, h, w] -> reshape [2F, h, w]
         sin_ch = sin_feat.permute(0, 3, 1, 2).contiguous().view(2 * self.num_frequencies, h, w)
         cos_ch = cos_feat.permute(0, 3, 1, 2).contiguous().view(2 * self.num_frequencies, h, w)
-        fourier_ch = torch.cat([sin_ch, cos_ch], dim=0)  # [1, 4F, h, w]
+        fourier_ch = torch.cat([sin_ch, cos_ch], dim=0).unsqueeze(0)  # [1, 4F, h, w]
         positional_embedding = self.proj(fourier_ch)
 
         return positional_embedding
@@ -382,7 +382,7 @@ class SIID(nn.Module):
             neg_tokens = self.text_proj(neg_cond).view(b, self.text_token_length, self.d_channels)  # [B, L, D]
             neg_tokens = self.token_norm(neg_tokens)
             for i, (cross_block, dec_block) in enumerate(zip(self.cross_blocks, self.dec_blocks)):
-                cross_delta = cross_block(eps_pos, neg_tokens)
+                cross_delta = cross_block(eps_neg, neg_tokens)
                 eps_neg = eps_neg + cross_delta
                 eps_neg = dec_block(eps_neg, film_vector)
             eps_neg = self.latent_to_epsilon(eps_neg)
