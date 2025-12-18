@@ -6,6 +6,7 @@ class RelPosEmbed2D(nn.Module):
     def __init__(self, num_frequencies: int, film_dim: int, eps: float = 1e-6):
         super().__init__()
         self.eps = float(eps)
+        self.num_frequencies = int(num_frequencies)
 
         powers = torch.arange(num_frequencies, dtype=torch.float32)  # [0, 1, ...]
         frequencies = torch.pi * (2.0 ** powers)  # [pi, 2pi, 4pi, ...]
@@ -116,8 +117,8 @@ class FiLM(nn.Module):
             nn.Linear(film_dim, 2 * out_dim),
         )
 
-        nn.init.normal_(self.film.weight, mean=0.0, std=1e-3)
-        nn.init.zeros_(self.film.bias)
+        nn.init.normal_(self.film[-1].weight, mean=0.0, std=1e-3)
+        nn.init.zeros_(self.film[-1].bias)
 
     def forward(self, time_cond):
         gb = self.film(time_cond)
@@ -278,6 +279,8 @@ class SIID(nn.Module):
             text_token_length: int = 1,
     ):
         super().__init__()
+        self.d_channels = int(d_channels)
+
         self.reduction_size = rescale_factor
         latent_img_channels = c_channels * rescale_factor ** 2
 
@@ -297,6 +300,7 @@ class SIID(nn.Module):
         self.time_embed = ContTimeEmbed(time_freq, film_dim)  # creates film vector
         self.size_embed = AbsSizeEmbed(size_freq, film_dim)  # added to film vector
 
+        self.text_token_length = text_token_length
         self.text_proj = nn.Linear(in_features=text_cond_dim, out_features=text_token_length * d_channels)
         self.token_norm = nn.LayerNorm(d_channels)
 
@@ -367,7 +371,7 @@ class SIID(nn.Module):
             for i, (cross_block, dec_block) in enumerate(zip(self.cross_blocks, self.dec_blocks)):
                 cross_delta = cross_block(eps_pos, pos_tokens)
                 eps_pos = eps_pos + cross_delta
-                eps_pos = dec_block(eps_pos)
+                eps_pos = dec_block(eps_pos, film_vector)
             eps_pos = self.latent_to_epsilon(eps_pos)
         else:
             eps_pos = None
@@ -380,7 +384,7 @@ class SIID(nn.Module):
             for i, (cross_block, dec_block) in enumerate(zip(self.cross_blocks, self.dec_blocks)):
                 cross_delta = cross_block(eps_pos, neg_tokens)
                 eps_neg = eps_neg + cross_delta
-                eps_neg = dec_block(eps_neg)
+                eps_neg = dec_block(eps_neg, film_vector)
             eps_neg = self.latent_to_epsilon(eps_neg)
         else:
             eps_neg = None
