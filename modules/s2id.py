@@ -45,10 +45,11 @@ class PosEmbed2d(nn.Module):
 
         yy, xx = torch.meshgrid(y_coordinates, x_coordinates, indexing="ij")
         grid = torch.stack([xx, yy], dim=0)
-        return grid
+        return grid, x_coordinates, y_coordinates
 
-    def forward(self, h: int, w: int, relative: bool) -> torch.Tensor:
-        grid = self._make_grid(h, w, relative).to(self.frequencies)
+    def forward(self, h: int, w: int, relative: bool):
+        grid, x_lin, y_lin = self._make_grid(h, w, relative)
+        grid = grid.to(self.frequencies)
 
         grid_unsqueezed = grid.unsqueeze(-1)  # [2, h, w, 1]
         frequencies = self.frequencies.view(1, 1, 1, -1)  # [1, 1, 1, F]
@@ -64,7 +65,7 @@ class PosEmbed2d(nn.Module):
         fourier_ch = torch.cat([sin_ch, cos_ch], dim=0).unsqueeze(0)  # [1, 4F, h, w]
         positional_embedding = self.norm(fourier_ch).squeeze(0)  # [4F, h, w]
 
-        return positional_embedding
+        return positional_embedding, x_lin, y_lin
 
 
 class ContTimeEmbed(nn.Module):
@@ -118,16 +119,12 @@ class CrossAttention(nn.Module):
         super().__init__()
         assert d_channels % num_heads == 0, f"d_channels ({d_channels}) must be divisible by num_heads ({num_heads})"
 
-        self.d_channels = d_channels
-
         self.mha = nn.MultiheadAttention(
             embed_dim=d_channels,
             num_heads=num_heads,
             batch_first=True,
             dropout=dropout,
         )
-
-        self.scalar = nn.Parameter(torch.ones(d_channels))
 
     def forward(self, image, text_tokens):
         b, d, h, w = image.shape
@@ -141,9 +138,7 @@ class CrossAttention(nn.Module):
         # reshape back to image grid [B, D, H, W]
         attn_out = attn_out.view(b, h, w, d).permute(0, 3, 1, 2).contiguous()  # [B, D, H, W]
 
-        scalar = self.scalar.view(1, self.d_channels, 1, 1)
-
-        return attn_out * scalar
+        return attn_out
 
 
 class AxialAttention(nn.Module):
@@ -167,21 +162,23 @@ class AxialAttention(nn.Module):
                 dropout=dropout,
             )
 
-    def forward(self, image):
+    def forward(self, image, attn_mask_row=None, attn_mask_col=None):
         b, d, h, w = image.shape
 
+        # attn_mask is there for EncBlock to use to do the gaussian masking
+
         x_row = image.permute(0, 2, 3, 1).contiguous().view(b * h, w, d)
-        attn_row_out, _ = self.row_mha(x_row, x_row, x_row, need_weights=False)
+        attn_row_out, _ = self.row_mha(x_row, x_row, x_row, need_weights=False, attn_mask=attn_mask_row)
         attn_row_out = attn_row_out.view(b, h, w, d).permute(0, 3, 1, 2).contiguous()
 
         x_col = image.permute(0, 3, 2, 1).contiguous().view(b * w, h, d)
-        attn_col_out, _ = self.col_mha(x_col, x_col, x_col, need_weights=False)
+        attn_col_out, _ = self.col_mha(x_col, x_col, x_col, need_weights=False, attn_mask=attn_mask_col)
         attn_col_out = attn_col_out.view(b, w, h, d).permute(0, 3, 2, 1).contiguous()
 
         return attn_row_out + attn_col_out
 
 
-class ViT(nn.Module):
+class EncBlock(nn.Module):
     def __init__(
             self,
             d_channels: int,
@@ -214,18 +211,29 @@ class ViT(nn.Module):
         )
         self.ffn_scalar = nn.Parameter(torch.ones(d_channels))
 
-        self.final_scalar = nn.Parameter(torch.ones(d_channels) * 1e-3)
-        self.final_film = FiLM(film_dim, d_channels)
+        self.final_scalar = nn.Parameter(torch.ones(d_channels) * 0.1)
 
-    def forward(self, image, film_vector):
-        b, d, h, w = image.shape
+    def forward(self, image, film_vector, x_lin, y_lin):
+        x_lin, y_lin = x_lin.to(image.device), y_lin.to(image.device)
+
+        sigma = 0.1667  # 0.5/3 so that +-3sigma = -0.5 to 0.5
+
+        dx = x_lin.unsqueeze(0) - x_lin.unsqueeze(1)  # [W, W]
+        d2x = dx * dx
+        attn_mask_row = -0.5 * (d2x / (sigma * sigma))  # [W, W]
+
+        dy = y_lin.unsqueeze(0) - y_lin.unsqueeze(1)  # [H, H]
+        d2y = dy * dy
+        attn_mask_col = -0.5 * (d2y / (sigma * sigma))  # [H, H]
+
+        # LOGIC FOR GAUSSIAN MASK CREATION ^^^
 
         working_image = image
 
         axial_norm = self.axial_norm(working_image)
         axial_g, axial_b = self.axial_film(film_vector)
         axial_filmed = axial_norm * axial_g.unsqueeze(-1).unsqueeze(-1) + axial_b.unsqueeze(-1).unsqueeze(-1)
-        axial_out = self.axial_attn(axial_filmed)
+        axial_out = self.axial_attn(axial_filmed, attn_mask_row, attn_mask_col)
 
         working_image = working_image + axial_out * self.axial_scalar.view(1, self.d_channels, 1, 1)
 
@@ -236,10 +244,81 @@ class ViT(nn.Module):
 
         working_image = working_image + ffn_out * self.ffn_scalar.view(1, self.d_channels, 1, 1)
 
-        blend_scalar = self.final_scalar.view(1, self.d_channels, 1, 1)
-        final_g, final_b = self.final_film(film_vector)
-        blend_scalar = final_g.unsqueeze(-1).unsqueeze(-1) * blend_scalar + final_b.unsqueeze(-1).unsqueeze(-1)
-        final_image = image + blend_scalar * working_image
+        final_image = image + working_image * self.final_scalar.view(1, self.d_channels, 1, 1)
+
+        return final_image
+
+
+class DecBlock(nn.Module):
+    def __init__(
+            self,
+            d_channels: int,
+            num_heads: int,
+            film_dim: int,
+            axial_dropout: float = 0.0,
+            cross_dropout: float = 0.0,
+            ffn_dropout: float = 0.0,
+            share_weights: bool = True,
+    ):
+        super().__init__()
+        self.d_channels = d_channels
+
+        self.axial_norm = nn.GroupNorm(num_heads, d_channels)
+        self.axial_film = FiLM(film_dim, d_channels)
+        self.axial_attn = AxialAttention(
+            d_channels=d_channels,
+            num_heads=num_heads,
+            dropout=axial_dropout,
+            share_weights=share_weights,
+        )
+        self.axial_scalar = nn.Parameter(torch.ones(d_channels))
+
+        self.cross_norm = nn.GroupNorm(num_heads, d_channels)
+        self.cross_film = FiLM(film_dim, d_channels)
+        self.cross_attn = CrossAttention(
+            d_channels=d_channels,
+            num_heads=num_heads,
+            dropout=cross_dropout,
+        )
+        self.cross_scalar = nn.Parameter(torch.ones(d_channels))
+
+        self.ffn_norm = nn.GroupNorm(1, d_channels)
+        self.ffn_film = FiLM(film_dim, d_channels)
+        self.ffn = nn.Sequential(
+            nn.Conv2d(d_channels, 4 * d_channels, 1),
+            nn.SiLU(),
+            nn.Dropout(ffn_dropout),
+            nn.Conv2d(4 * d_channels, d_channels, 1)
+        )
+        self.ffn_scalar = nn.Parameter(torch.ones(d_channels))
+
+        self.final_scalar = nn.Parameter(torch.ones(d_channels) * 0.1)
+
+    def forward(self, image, film_vector, text_tokens):
+        working_image = image
+
+        axial_norm = self.axial_norm(working_image)
+        axial_g, axial_b = self.axial_film(film_vector)
+        axial_filmed = axial_norm * axial_g.unsqueeze(-1).unsqueeze(-1) + axial_b.unsqueeze(-1).unsqueeze(-1)
+        axial_out = self.axial_attn(axial_filmed)
+
+        working_image = working_image + axial_out * self.axial_scalar.view(1, self.d_channels, 1, 1)
+
+        cross_norm = self.cross_norm(working_image)
+        cross_g, cross_b = self.cross_film(film_vector)
+        cross_filmed = cross_norm * cross_g.unsqueeze(-1).unsqueeze(-1) + cross_b.unsqueeze(-1).unsqueeze(-1)
+        cross_out = self.cross_attn(cross_filmed, text_tokens)
+
+        working_image = working_image + cross_out * self.cross_scalar.view(1, self.d_channels, 1, 1)
+
+        ffn_norm = self.ffn_norm(working_image)
+        ffn_g, ffn_b = self.ffn_film(film_vector)
+        ffn_filmed = ffn_norm * ffn_g.unsqueeze(-1).unsqueeze(-1) + ffn_b.unsqueeze(-1).unsqueeze(-1)
+        ffn_out = self.ffn(ffn_filmed)
+
+        working_image = working_image + ffn_out * self.ffn_scalar.view(1, self.d_channels, 1, 1)
+
+        final_image = image + working_image * self.final_scalar.view(1, self.d_channels, 1, 1)
 
         return final_image
 
@@ -260,8 +339,8 @@ class SIID(nn.Module):
             time_high_freq: int,
             time_low_freq: int,
             film_dim: int,  # dimension that the base film vector sits in, then gets turned to d channels
-            cross_dropout: float = 0.0,
             axial_dropout: float = 0.0,
+            cross_dropout: float = 0.0,
             ffn_dropout: float = 0.0,
             share_weights: bool = False,
     ):
@@ -293,7 +372,7 @@ class SIID(nn.Module):
         )
 
         self.enc_blocks = nn.ModuleList([
-            ViT(
+            EncBlock(
                 d_channels=d_channels,
                 num_heads=num_heads,
                 film_dim=film_dim,
@@ -303,21 +382,14 @@ class SIID(nn.Module):
             ) for _ in range(enc_blocks)
         ])
 
-        self.cross_blocks = nn.ModuleList([
-            CrossAttention(
-                d_channels=d_channels,
-                num_heads=num_heads,
-                dropout=cross_dropout
-            ) for _ in range(dec_blocks)
-        ])
-
         self.dec_blocks = nn.ModuleList([
-            ViT(
+            DecBlock(
                 d_channels=d_channels,
                 num_heads=num_heads,
                 film_dim=film_dim,
                 axial_dropout=axial_dropout,
                 ffn_dropout=ffn_dropout,
+                cross_dropout=cross_dropout,
                 share_weights=share_weights
             ) for _ in range(dec_blocks)
         ])
@@ -339,8 +411,10 @@ class SIID(nn.Module):
 
         shuffled_image = self.pixel_unshuffle(image)
         latent_h, latent_w = shuffled_image.size(-2), shuffled_image.size(-1)
-        rel_pos_map = self.pos_embed(latent_h, latent_w, True).expand(b, -1, -1, -1)  # [b, 4F, H, W]
-        abs_pos_map = self.pos_embed(latent_h, latent_w, False).expand(b, -1, -1, -1)  # [1, 4F, H, W]
+        rel_pos_map, x_lin, y_lin = self.pos_embed(latent_h, latent_w, True)
+        rel_pos_map = rel_pos_map.expand(b, -1, -1, -1)  # [b, 4F, H, W]
+        abs_pos_map, _, _ = self.pos_embed(latent_h, latent_w, False)
+        abs_pos_map = abs_pos_map.expand(b, -1, -1, -1)  # [1, 4F, H, W]
         stacked_latent = torch.cat([shuffled_image, rel_pos_map, abs_pos_map], dim=-3)
         latent = self.proj_to_latent(stacked_latent)
 
@@ -348,33 +422,28 @@ class SIID(nn.Module):
         film_vector = self.film_proj(time_vector)
 
         for i, enc_block in enumerate(self.enc_blocks):
-            latent = enc_block(latent, film_vector)
+            latent = enc_block(latent, film_vector, x_lin, y_lin)
 
-        def cross_and_dec(latent_tensor, conditioning):
-            epsilon = latent_tensor
-            for i, (cross_block, dec_block) in enumerate(zip(self.cross_blocks, self.dec_blocks)):
-                cross_delta = cross_block(epsilon, conditioning)
-                epsilon = epsilon + cross_delta
-                epsilon = dec_block(epsilon, film_vector)
-            epsilon = self.latent_to_epsilon(epsilon)
-            return epsilon
+        def iterate_over_dec(tensor, tokens):
+            for i, dec_block in enumerate(self.dec_blocks):
+                tensor = dec_block(tensor, film_vector, tokens)
+            tensor = self.latent_to_epsilon(tensor)
+            return tensor
 
         # eps_null for null vector
-        null_tokens = self.null_token.expand(b, 1, -1)  # [B, L, E]
-        eps_null = cross_and_dec(latent, null_tokens)
+        eps_null, null_tokens = latent, self.null_token.expand(b, 1, -1)  # [B, L, E]
+        eps_null = iterate_over_dec(eps_null, null_tokens)
 
         # eps_pos for positive conditioning
+        eps_pos = None
         if pos_cond is not None:
-            pos_tokens = self.text_model(pos_cond)
-            eps_pos = cross_and_dec(latent, pos_tokens)
-        else:
-            eps_pos = None
+            eps_pos, pos_tokens = latent, self.text_model(pos_cond)
+            eps_pos = iterate_over_dec(eps_pos, pos_tokens)
 
         # eps_neg for negative_conditioning
+        eps_neg = None
         if neg_cond is not None:
-            neg_tokens = self.text_model(neg_cond)
-            eps_neg = cross_and_dec(latent, neg_tokens)
-        else:
-            eps_neg = None
+            eps_neg, neg_tokens = latent, self.text_model(neg_cond)
+            eps_neg = iterate_over_dec(eps_neg, neg_tokens)
 
         return eps_null, eps_pos, eps_neg

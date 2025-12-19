@@ -64,17 +64,19 @@ model = SIID(
     time_high_freq=7,
     time_low_freq=3,
     film_dim=320,
-    cross_dropout=0.1,
     axial_dropout=0.1,
+    cross_dropout=0.1,
     ffn_dropout=0.2,
     share_weights=False,
 ).to(device)
 
-from save_load_model import load_checkpoint_into
+# from save_load_model import load_checkpoint_into
+#
+# model = load_checkpoint_into(model, "models/baselineE30_0.02192_20251219_150002.pt", "cuda")
+# model.to(device)
+# model.eval()
 
-model = load_checkpoint_into(model, "models/baselineE30_0.02192_20251219_150002.pt", "cuda")
-model.to(device)
-model.eval()
+
 import copy
 
 ema_model = copy.deepcopy(model)
