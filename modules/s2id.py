@@ -2,6 +2,19 @@ import torch
 from torch import nn
 
 
+class DummyTextCond(nn.Module):
+    def __init__(self, d_channels):
+        super().__init__()
+        self.text_token_length = 1
+        self.text_proj = nn.Linear(in_features=10, out_features=d_channels)
+        self.token_norm = nn.LayerNorm(d_channels)
+
+    def forward(self, label_vector):
+        tokens = self.text_proj(label_vector).unsqueeze(1)
+        tokens = self.token_norm(tokens)
+        return tokens
+
+
 class PosEmbed2d(nn.Module):
     def __init__(self, num_high_freq: int, num_low_freq: int, eps: float = 1e-6):
         super().__init__()
@@ -250,9 +263,7 @@ class SIID(nn.Module):
             cross_dropout: float = 0.0,
             axial_dropout: float = 0.0,
             ffn_dropout: float = 0.0,
-            text_cond_dim: int = 10,
-            text_token_length: int = 1,
-            share_weights: bool = True,
+            share_weights: bool = False,
     ):
         super().__init__()
         self.d_channels = int(d_channels)
@@ -280,10 +291,6 @@ class SIID(nn.Module):
             nn.Linear(film_dim, film_dim),
             nn.SiLU()
         )
-
-        self.text_token_length = text_token_length
-        self.text_proj = nn.Linear(in_features=text_cond_dim, out_features=text_token_length * d_channels)
-        self.token_norm = nn.LayerNorm(d_channels)
 
         self.enc_blocks = nn.ModuleList([
             ViT(
@@ -315,6 +322,9 @@ class SIID(nn.Module):
             ) for _ in range(dec_blocks)
         ])
 
+        self.null_token = nn.Parameter(torch.zeros(d_channels))
+        self.text_model = DummyTextCond(d_channels)
+
     def forward(
             self,
             image: torch.Tensor,
@@ -340,35 +350,30 @@ class SIID(nn.Module):
         for i, enc_block in enumerate(self.enc_blocks):
             latent = enc_block(latent, film_vector)
 
-        # eps_null for no conditioning
-        eps_null = latent
-        for i, dec_block in enumerate(self.dec_blocks):
-            eps_null = dec_block(eps_null, film_vector)
-        eps_null = self.latent_to_epsilon(eps_null)
+        def cross_and_dec(latent_tensor, conditioning):
+            epsilon = latent_tensor
+            for i, (cross_block, dec_block) in enumerate(zip(self.cross_blocks, self.dec_blocks)):
+                cross_delta = cross_block(epsilon, conditioning)
+                epsilon = epsilon + cross_delta
+                epsilon = dec_block(epsilon, film_vector)
+            epsilon = self.latent_to_epsilon(epsilon)
+            return epsilon
+
+        # eps_null for null vector
+        null_tokens = self.null_token.expand(b, 1, -1)  # [B, L, E]
+        eps_null = cross_and_dec(latent, null_tokens)
 
         # eps_pos for positive conditioning
         if pos_cond is not None:
-            eps_pos = latent
-            pos_tokens = self.text_proj(pos_cond).view(b, self.text_token_length, self.d_channels)  # [B, L, D]
-            pos_tokens = self.token_norm(pos_tokens)
-            for i, (cross_block, dec_block) in enumerate(zip(self.cross_blocks, self.dec_blocks)):
-                cross_delta = cross_block(eps_pos, pos_tokens)
-                eps_pos = eps_pos + cross_delta
-                eps_pos = dec_block(eps_pos, film_vector)
-            eps_pos = self.latent_to_epsilon(eps_pos)
+            pos_tokens = self.text_model(pos_cond)
+            eps_pos = cross_and_dec(latent, pos_tokens)
         else:
             eps_pos = None
 
         # eps_neg for negative_conditioning
         if neg_cond is not None:
-            eps_neg = latent
-            neg_tokens = self.text_proj(neg_cond).view(b, self.text_token_length, self.d_channels)  # [B, L, D]
-            neg_tokens = self.token_norm(neg_tokens)
-            for i, (cross_block, dec_block) in enumerate(zip(self.cross_blocks, self.dec_blocks)):
-                cross_delta = cross_block(eps_neg, neg_tokens)
-                eps_neg = eps_neg + cross_delta
-                eps_neg = dec_block(eps_neg, film_vector)
-            eps_neg = self.latent_to_epsilon(eps_neg)
+            neg_tokens = self.text_model(neg_cond)
+            eps_neg = cross_and_dec(latent, neg_tokens)
         else:
             eps_neg = None
 

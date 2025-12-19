@@ -54,21 +54,19 @@ from modules.count_params import count_parameters
 
 model = SIID(
     c_channels=1,
-    d_channels=512,
+    d_channels=320,
     rescale_factor=8,
-    enc_blocks=8,
-    dec_blocks=8,
-    num_heads=8,
+    enc_blocks=6,
+    dec_blocks=6,
+    num_heads=5,
     pos_high_freq=2,
     pos_low_freq=3,
     time_high_freq=7,
     time_low_freq=3,
-    film_dim=1024,
-    cross_dropout=0.05,
-    axial_dropout=0.05,
-    ffn_dropout=0.1,
-    text_cond_dim=10,
-    text_token_length=1,
+    film_dim=320,
+    cross_dropout=0.1,
+    axial_dropout=0.1,
+    ffn_dropout=0.2,
     share_weights=False,
 ).to(device)
 
@@ -380,9 +378,9 @@ for E in range(num_epochs):
         for i in range(10):
             positive_text_conditioning[i * 10:(i + 1) * 10, i] = 1.0
 
-        small_noise = torch.randn(100, 1, 6 * 8, 6 * 8).to(device)
-        medium_noise = torch.randn(100, 1, 8 * 8, 8 * 8).to(device)
-        big_noise = torch.randn(100, 1, 10 * 8, 10 * 8).to(device)
+        small_noise = torch.randn(100, 1, 48, 48).to(device)
+        medium_noise = torch.randn(100, 1, 64, 64).to(device)
+        big_noise = torch.randn(100, 1, 80, 80).to(device)
 
         final_x0_hat, final_x = run_ddim_visualization(
             model=ema_model,
