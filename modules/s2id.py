@@ -2,19 +2,6 @@ import torch
 from torch import nn
 
 
-class DummyTextCond(nn.Module):
-    def __init__(self, d_channels):
-        super().__init__()
-        self.text_token_length = 1
-        self.text_proj = nn.Linear(in_features=10, out_features=d_channels)
-        self.token_norm = nn.LayerNorm(d_channels)
-
-    def forward(self, label_vector):
-        tokens = self.text_proj(label_vector).unsqueeze(1)
-        tokens = self.token_norm(tokens)
-        return tokens
-
-
 class PosEmbed2d(nn.Module):
     def __init__(self, num_high_freq: int, num_low_freq: int, eps: float = 1e-6):
         super().__init__()
@@ -185,11 +172,12 @@ class EncBlock(nn.Module):
             film_dim: int,
             axial_dropout: float = 0.0,
             ffn_dropout: float = 0.0,
+            sigma: float = 0.1667,  # 0.1667=0.5/3 so that +-3sigma = -0.5 to 0.5
             share_weights: bool = True,
     ):
         super().__init__()
         self.d_channels = d_channels
-        self.sigma = nn.Parameter(torch.logit(torch.tensor(0.1667)))
+        self.sigma = nn.Parameter(torch.logit(torch.tensor(sigma)))
 
         self.axial_norm = nn.GroupNorm(num_heads, d_channels)
         self.axial_film = FiLM(film_dim, d_channels)
@@ -213,20 +201,11 @@ class EncBlock(nn.Module):
 
         self.final_scalar = nn.Parameter(torch.ones(d_channels) * 0.1)
 
-    def forward(self, image, film_vector, x_lin, y_lin):
-        x_lin, y_lin = x_lin.to(image.device), y_lin.to(image.device)
-
-        # sigma = 0.1667  # 0.5/3 so that +-3sigma = -0.5 to 0.5
+    def forward(self, image, film_vector, d2x, d2y):
         sigma = torch.sigmoid(self.sigma)
 
-        dx = x_lin.unsqueeze(0) - x_lin.unsqueeze(1)  # [W, W]
-        d2x = dx * dx
         attn_mask_row = -0.5 * (d2x / (sigma * sigma))  # [W, W]
-
-        dy = y_lin.unsqueeze(0) - y_lin.unsqueeze(1)  # [H, H]
-        d2y = dy * dy
         attn_mask_col = -0.5 * (d2y / (sigma * sigma))  # [H, H]
-
         # LOGIC FOR GAUSSIAN MASK CREATION ^^^
 
         working_image = image
@@ -347,17 +326,17 @@ class SIID(nn.Module):
     ):
         super().__init__()
         self.d_channels = int(d_channels)
-        total_pos_freq = pos_low_freq + pos_high_freq
-        total_time_freq = time_low_freq + time_high_freq
+        num_pos_frequencies = pos_low_freq + pos_high_freq
+        num_time_frequencies = time_low_freq + time_high_freq
 
-        print(f"Total channels for positioning: {total_pos_freq * 4 * 2}")
+        print(f"Total channels for positioning: {num_pos_frequencies * 4 * 2}")
         print(f"Total channels for color: {c_channels * rescale_factor ** 2}")
 
         self.reduction_size = rescale_factor
         latent_img_channels = c_channels * rescale_factor ** 2
 
         self.pixel_unshuffle = nn.PixelUnshuffle(rescale_factor)
-        self.proj_to_latent = nn.Conv2d(total_pos_freq * 4 * 2 + latent_img_channels, d_channels, 1)
+        self.proj_to_latent = nn.Conv2d(num_pos_frequencies * 4 * 2 + latent_img_channels, d_channels, 1)
 
         self.latent_to_epsilon = nn.Sequential(
             nn.Conv2d(d_channels, latent_img_channels, 1),
@@ -369,7 +348,7 @@ class SIID(nn.Module):
         self.pos_embed = PosEmbed2d(pos_high_freq, pos_low_freq)
         self.time_embed = ContTimeEmbed(time_high_freq, time_low_freq)
         self.film_proj = nn.Sequential(
-            nn.Linear(total_time_freq * 2, film_dim),
+            nn.Linear(num_time_frequencies * 2, film_dim),
             nn.SiLU(),
             nn.Linear(film_dim, film_dim),
             nn.SiLU()
@@ -398,16 +377,7 @@ class SIID(nn.Module):
             ) for _ in range(dec_blocks)
         ])
 
-        self.null_token = nn.Parameter(torch.zeros(d_channels))
-        self.text_model = DummyTextCond(d_channels)
-
-    def forward(
-            self,
-            image: torch.Tensor,
-            alpha_bar: torch.Tensor,
-            pos_cond=None,
-            neg_cond=None,
-    ):
+    def forward(self, image: torch.Tensor, alpha_bar: torch.Tensor, text_conds: list[torch.Tensor]):
         assert image.size(-1) % self.reduction_size == 0, f"Image width must be divisible by {self.reduction_size}"
         assert image.size(-2) % self.reduction_size == 0, f"Image height must be divisible by {self.reduction_size}"
         assert image.ndim == 4, "Image must be batch, tensor shape of [B, C, H, W]"
@@ -425,29 +395,21 @@ class SIID(nn.Module):
         time_vector = self.time_embed(alpha_bar)  # [B, time_dim]
         film_vector = self.film_proj(time_vector)
 
+        x_lin, y_lin = x_lin.to(image.device), y_lin.to(image.device)
+        dx = x_lin.unsqueeze(0) - x_lin.unsqueeze(1)  # [W, W]
+        dy = y_lin.unsqueeze(0) - y_lin.unsqueeze(1)  # [H, H]
+        d2x, d2y = dx * dx, dy * dy
+
         for i, enc_block in enumerate(self.enc_blocks):
-            latent = enc_block(latent, film_vector, x_lin, y_lin)
+            latent = enc_block(latent, film_vector, d2x, d2y)
 
-        def iterate_over_dec(tensor, tokens):
+        # text_conds is a list of tensors, each tensor is the token conditioning
+        epsilon_list = []
+        for token_sequence in text_conds:
+            latent_copy = latent
             for i, dec_block in enumerate(self.dec_blocks):
-                tensor = dec_block(tensor, film_vector, tokens)
-            tensor = self.latent_to_epsilon(tensor)
-            return tensor
+                latent_copy = dec_block(latent_copy, film_vector, token_sequence)
+            epsilon = self.latent_to_epsilon(latent_copy)
+            epsilon_list.append(epsilon)
 
-        # eps_null for null vector
-        eps_null, null_tokens = latent, self.null_token.expand(b, 1, -1)  # [B, L, E]
-        eps_null = iterate_over_dec(eps_null, null_tokens)
-
-        # eps_pos for positive conditioning
-        eps_pos = None
-        if pos_cond is not None:
-            eps_pos, pos_tokens = latent, self.text_model(pos_cond)
-            eps_pos = iterate_over_dec(eps_pos, pos_tokens)
-
-        # eps_neg for negative_conditioning
-        eps_neg = None
-        if neg_cond is not None:
-            eps_neg, neg_tokens = latent, self.text_model(neg_cond)
-            eps_neg = iterate_over_dec(eps_neg, neg_tokens)
-
-        return eps_null, eps_pos, eps_neg
+        return epsilon_list
