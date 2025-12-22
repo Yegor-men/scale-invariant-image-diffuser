@@ -50,7 +50,7 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Cuda is available: {torch.cuda.is_available()}")
 
 from modules.s2id import SIID
-from modules.count_params import count_parameters
+from modules.dummy_textencoder import DummyTextCond
 
 model = SIID(
     c_channels=1,
@@ -70,12 +70,12 @@ model = SIID(
     share_weights=False,
 ).to(device)
 
-# from save_load_model import load_checkpoint_into
-#
-# model = load_checkpoint_into(model, "models/baselineE30_0.02192_20251219_150002.pt", "cuda")
-# model.to(device)
-# model.eval()
+model.print_model_summary()
 
+text_encoder = DummyTextCond(
+    token_sequence_length=1,
+    d_channels=model.d_channels
+).to(device)
 
 import copy
 
@@ -91,7 +91,6 @@ def update_ema_model(model, ema_model, decay):
         ema_param.data.mul_(decay).add_(param.data, alpha=1 - decay)
 
 
-count_parameters(model)
 time.sleep(0.2)
 
 # ======================================================================================================================
@@ -133,7 +132,7 @@ final_lr = 1e-5
 total_steps = num_epochs * len(train_dloader)
 warmup_steps = len(train_dloader)
 
-optimizer = torch.optim.AdamW(params=model.parameters(), lr=peak_lr)
+optimizer = torch.optim.AdamW(params=list(model.parameters()) + list(text_encoder.parameters()), lr=peak_lr)
 scheduler = make_cosine_with_warmup(optimizer, warmup_steps, total_steps, final_lr)
 
 # ======================================================================================================================
@@ -237,37 +236,38 @@ for E in range(num_epochs):
     # TRAINING
     train_loss = 0
     model.train()
-    for i, (orig_image, label) in tqdm(enumerate(train_dloader), total=len(train_dloader), leave=True, desc=f"E:{E}"):
-        b, c, h, w = orig_image.shape
+    for i, (image, label) in tqdm(enumerate(train_dloader), total=len(train_dloader), leave=True, desc=f"E:{E}"):
+        b, c, h, w = image.shape
         if b != batch_size:
             continue
 
         with torch.no_grad():
             # rescaled_image, (h_new, w_new) = random_batch_rescale(
-            #     orig_image,
+            #     image,
             #     min_size=6 * 8,
             #     max_size=10 * 8,
             #     step_multiple=8,
             #     ensure_divisible_by=8,
             #     keep_square=True,
             #     per_sample=False,
-            #     device=orig_image.device
+            #     device=image.device
             # )
 
-            image = orig_image * 2.0 - 1.0
+            image, label = image.to(device), label.to(device)
+
+            image = image * 2.0 - 1.0
             t = torch.rand(b)
             t, _ = torch.sort(t)
-            alpha_bar = alpha_bar_cosine(t)
+            alpha_bar = alpha_bar_cosine(t).to(device)
             noisy_image, eps = corrupt_image(image, alpha_bar)
-            pos_cond = label
+            noisy_image, eps = noisy_image.to(device), eps.to(device)
+            pos_cond = text_encoder(label).to(device)
+            null_cond = text_encoder(torch.zeros_like(label)).to(device)
+            cond_list = [pos_cond, null_cond]
 
-            noisy_image = noisy_image.to(device)
-            alpha_bar = alpha_bar.to(device)
-            pos_cond = pos_cond.to(device)
-            eps = eps.to(device)
-
-        eps_null, eps_pos, eps_neg = model(noisy_image, alpha_bar, pos_cond)
-        loss = nn.functional.mse_loss(eps_null, eps) + nn.functional.mse_loss(eps_pos, eps)
+        predicted_eps_list = model(noisy_image, alpha_bar, cond_list)
+        eps_pos, eps_null = predicted_eps_list[0], predicted_eps_list[1]
+        loss = (nn.functional.mse_loss(eps_null, eps) + nn.functional.mse_loss(eps_pos, eps)) / 2
         train_loss += loss.item()
         loss.backward()
         optimizer.step()
@@ -282,25 +282,26 @@ for E in range(num_epochs):
     test_loss = 0
     model.eval()
     with torch.no_grad():
-        for i, (orig_image, label) in tqdm(enumerate(test_dloader), total=len(test_dloader), leave=True, desc=f"E:{E}"):
-            b, c, h, w = orig_image.shape
+        for i, (image, label) in tqdm(enumerate(test_dloader), total=len(test_dloader), leave=True, desc=f"E:{E}"):
+            b, c, h, w = image.shape
             if b != batch_size:
                 continue
 
-            image = orig_image * 2.0 - 1.0
+            image, label = image.to(device), label.to(device)
+
+            image = image * 2.0 - 1.0
             t = torch.rand(b)
             t, _ = torch.sort(t)
-            alpha_bar = alpha_bar_cosine(t)
+            alpha_bar = alpha_bar_cosine(t).to(device)
             noisy_image, eps = corrupt_image(image, alpha_bar)
-            pos_cond = label
+            noisy_image, eps = noisy_image.to(device), eps.to(device)
+            pos_cond = text_encoder(label).to(device)
+            null_cond = text_encoder(torch.zeros_like(label)).to(device)
+            cond_list = [pos_cond, null_cond]
 
-            noisy_image = noisy_image.to(device)
-            alpha_bar = alpha_bar.to(device)
-            pos_cond = pos_cond.to(device)
-            eps = eps.to(device)
-
-            eps_null, eps_pos, eps_neg = model(noisy_image, alpha_bar, pos_cond)
-            loss = nn.functional.mse_loss(eps_null, eps) + nn.functional.mse_loss(eps_pos, eps)
+            predicted_eps_list = model(noisy_image, alpha_bar, cond_list)
+            eps_pos, eps_null = predicted_eps_list[0], predicted_eps_list[1]
+            loss = (nn.functional.mse_loss(eps_null, eps) + nn.functional.mse_loss(eps_pos, eps)) / 2
             test_loss += loss.item()
 
             # if i == 0:
@@ -336,20 +337,21 @@ for E in range(num_epochs):
         t_scrape_pos_losses = []
 
         for t in t_range:
-            orig_image, label = next(iter(train_dloader))
-            b, c, h, w = orig_image.shape
-            image = orig_image * 2.0 - 1.0
+            image, label = next(iter(train_dloader))
+            b, c, h, w = image.shape
+            image, label = image.to(device), label.to(device)
+            image = image * 2.0 - 1.0
 
-            alpha_bar = alpha_bar_cosine(torch.ones(b) * t)
+            alpha_bar = alpha_bar_cosine(torch.ones(b) * t).to(device)
             noisy_image, eps = corrupt_image(image, alpha_bar)
-            pos_cond = label
+            noisy_image, eps = noisy_image.to(device), eps.to(device)
+            pos_cond = text_encoder(label).to(device)
+            null_cond = text_encoder(torch.zeros_like(label)).to(device)
+            cond_list = [pos_cond, null_cond]
 
-            noisy_image = noisy_image.to(device)
-            alpha_bar = alpha_bar.to(device)
-            pos_cond = pos_cond.to(device)
-            eps = eps.to(device)
+            predicted_eps_list = model(noisy_image, alpha_bar, cond_list)
+            eps_pos, eps_null = predicted_eps_list[0], predicted_eps_list[1]
 
-            eps_null, eps_pos, eps_neg = model(noisy_image, alpha_bar, pos_cond)
             null_loss = nn.functional.mse_loss(eps_null, eps)
             pos_loss = nn.functional.mse_loss(eps_pos, eps)
 
@@ -380,9 +382,12 @@ for E in range(num_epochs):
 
     # RENDERING
     with torch.no_grad():
-        positive_text_conditioning = torch.zeros(100, 10).to(device)
+        positive_label = torch.zeros(100, 10).to(device)
         for i in range(10):
-            positive_text_conditioning[i * 10:(i + 1) * 10, i] = 1.0
+            positive_label[i * 10:(i + 1) * 10, i] = 1.0
+
+        pos_text_cond = text_encoder(positive_label)
+        null_text_cond = text_encoder(torch.zeros_like(positive_label))
 
         small_noise = torch.randn(100, 1, 48, 48).to(device)
         medium_noise = torch.randn(100, 1, 64, 64).to(device)
@@ -391,7 +396,8 @@ for E in range(num_epochs):
         final_x0_hat, final_x = run_ddim_visualization(
             model=ema_model,
             initial_noise=small_noise,
-            positive_text_conditioning=positive_text_conditioning,
+            pos_text_cond=pos_text_cond,
+            null_text_cond=null_text_cond,
             alpha_bar_fn=alpha_bar_cosine,
             render_image_fn=render_image,
             num_steps=50,
@@ -404,7 +410,8 @@ for E in range(num_epochs):
         final_x0_hat, final_x = run_ddim_visualization(
             model=ema_model,
             initial_noise=medium_noise,
-            positive_text_conditioning=positive_text_conditioning,
+            pos_text_cond=pos_text_cond,
+            null_text_cond=null_text_cond,
             alpha_bar_fn=alpha_bar_cosine,
             render_image_fn=render_image,
             num_steps=50,
@@ -417,7 +424,8 @@ for E in range(num_epochs):
         final_x0_hat, final_x = run_ddim_visualization(
             model=ema_model,
             initial_noise=big_noise,
-            positive_text_conditioning=positive_text_conditioning,
+            pos_text_cond=pos_text_cond,
+            null_text_cond=null_text_cond,
             alpha_bar_fn=alpha_bar_cosine,
             render_image_fn=render_image,
             num_steps=20,
