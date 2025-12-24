@@ -42,18 +42,22 @@ model.eval()
 text_encoder.to(device)
 text_encoder.eval()
 
-import time
-
 with torch.no_grad():
     positive_label = torch.zeros(100, 10).to(device)
     for i in range(10):
         positive_label[i * 10:(i + 1) * 10, i] = 1.0
+
+    # positive_label = torch.zeros(10, 10).to(device)
+    # for i in range(10):
+    #     positive_label[i][i] = 1.0
+    # UNCOMMENT FOR SDXL RENDERING, IT'S BATCH SIZE 10, NOT 100
 
     pos_text_cond = text_encoder(positive_label)
     null_text_cond = text_encoder(torch.zeros_like(positive_label))
 
     rf = model.rescale_factor
     sizes = [
+        # (128, 128, "SDXL 1MP")  # need to change the positive label code above to fit batch size 10 for memory
         (8, 8, "1:1"),
         (6, 9, "3:2"),
         (9, 6, "2:3"),
@@ -66,7 +70,7 @@ with torch.no_grad():
     ]
 
     for (height, width, name) in sizes:
-        grid_noise = torch.randn(100, 1, rf * height, rf * width).to(device)
+        grid_noise = torch.randn(100, 1, rf * height, rf * width).to(device)  # change 100 to 10 for the sdxl 1mp
 
         final_x0_hat, final_x = run_ddim_visualization(
             model=model,
@@ -76,8 +80,8 @@ with torch.no_grad():
             alpha_bar_fn=alpha_bar_cosine,
             render_image_fn=render_image,
             num_steps=100,
-            cfg_scale=4.0,
-            eta=2.0,
+            cfg_scale=4.0,  # change to 1.0 for sdxl
+            eta=2.0,  # change to 1.0 for sdxl
             render_every=1000,
             device=torch.device("cuda"),
             title=f"{name} - H:{rf * height}, W:{rf * width}"
