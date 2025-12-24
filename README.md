@@ -1,4 +1,4 @@
-# S2ID
+# SIID (S2ID)
 
 Scale Invariant Image Diffuser
 
