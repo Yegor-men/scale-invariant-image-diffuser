@@ -14,7 +14,7 @@ def one_hot_encode(label):
     return torch.nn.functional.one_hot(torch.tensor(label), num_classes=10).float()
 
 
-image_size = 64
+image_size = 28
 
 
 class OneHotMNIST(torch.utils.data.Dataset):
@@ -54,16 +54,16 @@ from modules.dummy_textencoder import DummyTextCond
 
 model = SIID(
     c_channels=1,
-    d_channels=256,
-    rescale_factor=8,
+    d_channels=128,
+    rescale_factor=1,
     enc_blocks=8,
     dec_blocks=8,
     num_heads=8,
-    pos_high_freq=2,
+    pos_high_freq=8,
     pos_low_freq=3,
     time_high_freq=7,
     time_low_freq=3,
-    film_dim=256,
+    film_dim=128,
     axial_dropout=0.1,
     cross_dropout=0.1,
     ffn_dropout=0.2,
@@ -73,7 +73,7 @@ model = SIID(
 model.print_model_summary()
 
 text_encoder = DummyTextCond(
-    token_sequence_length=1,
+    token_sequence_length=2,
     d_channels=model.d_channels
 ).to(device)
 
@@ -120,8 +120,8 @@ def make_cosine_with_warmup(optimizer, warmup_steps, total_steps, lr_end):
     return LambdaLR(optimizer, lr_lambda, -1)
 
 
-num_epochs = 60
-batch_size = 50
+num_epochs = 20
+batch_size = 25
 ema_decay = 0.9995
 
 train_dloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
@@ -304,26 +304,10 @@ for E in range(num_epochs):
             loss = (nn.functional.mse_loss(eps_null, eps) + nn.functional.mse_loss(eps_pos, eps)) / 2
             test_loss += loss.item()
 
-            # if i == 0:
-            #     fixed_noisy = torch.clamp(((noisy_image + 1) / 2), min=0.0, max=1.0)
-            #     fixed_null = torch.clamp(((eps_null + 1) / 2), min=0.0, max=1.0)
-            #     fixed_pos = torch.clamp(((eps_pos + 1) / 2), min=0.0, max=1.0)
-            #     fixed_eps = torch.clamp(((eps + 1) / 2), min=0.0, max=1.0)
-            #
-            #     render_image(fixed_noisy, title=f"E{E} - Noisy Image")
-            #     render_image(fixed_null, title=f"E{E} - Eps Null")
-            #     render_image(fixed_pos, title=f"E{E} - Eps Pos")
-            #     render_image(fixed_eps, title=f"E{E} - Epsilon")
-            #     render_image((eps_null - eps) ** 2, title=f"E{E} - Eps Null MSE")
-            #     render_image((eps_pos - eps) ** 2, title=f"E{E} - Eps Pos MSE")
-
     test_loss /= len(test_dloader)
     test_losses.append(test_loss)
     print(f"Epoch {E} - TRAIN: {train_loss:.5f}, TEST: {test_loss:.5f}")
     time.sleep(0.2)
-
-    sigmas = [torch.sigmoid(block.sigma) for block in ema_model.enc_blocks]
-    print(sigmas)
 
     plt.plot(train_losses, label="Train")
     plt.plot(test_losses, label="Test")
@@ -391,15 +375,26 @@ for E in range(num_epochs):
 
         rf = model.rescale_factor
         sizes = [
-            (8, 8, "1:1"),
-            (6, 9, "3:2"),
-            (9, 6, "2:3"),
-            (8, 6, "3:4"),
-            (6, 8, "4:3"),
-            (8, 10, "5:4"),
-            (10, 8, "4:5"),
-            (9, 16, "16:9"),
-            (16, 9, "9:16"),
+            # (8, 8, "1:1"),
+            # (6, 9, "3:2"),
+            # (9, 6, "2:3"),
+            # (8, 6, "3:4"),
+            # (6, 8, "4:3"),
+            # (8, 10, "5:4"),
+            # (10, 8, "4:5"),
+            # (9, 16, "16:9"),
+            # (16, 9, "9:16"),
+            # (16, 16, "Double Resolution"),
+            (28, 28, "1:1"),
+            (18, 27, "3:2"),
+            (27, 18, "2:3"),
+            (32, 24, "3:4"),
+            (24, 32, "4:3"),
+            (24, 30, "5:4"),
+            (30, 24, "4:5"),
+            (18, 32, "16:9"),
+            (32, 18, "9:16"),
+            (56, 56, "Double Resolution"),
         ]
 
         for (height, width, name) in sizes:
