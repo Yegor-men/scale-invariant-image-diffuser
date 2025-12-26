@@ -38,7 +38,6 @@ class PosEmbed2d(nn.Module):
         base_grid = self._make_grid(h, w, relative)
         base_grid = base_grid.to(self.frequencies.device)  # [2, h, w]
 
-        # Expand base_grid to batch size
         grid = base_grid.unsqueeze(0).expand(batch_size, -1, -1, -1)  # [b, 2, h, w]
 
         if self.training:
@@ -55,7 +54,6 @@ class PosEmbed2d(nn.Module):
             jitter = torch.cat([jitter_x, jitter_y], dim=1)  # [b, 2, h, w]
             grid = grid + jitter
 
-        # Now compute the Fourier features
         grid_unsqueezed = grid.unsqueeze(-1)  # [b, 2, h, w, 1]
         frequencies = self.frequencies.view(1, 1, 1, 1, -1)  # [1, 1, 1, 1, F]
         tproj = grid_unsqueezed * frequencies  # [b, 2, h, w, F]
@@ -63,7 +61,6 @@ class PosEmbed2d(nn.Module):
         sin_feat = torch.sin(tproj)  # [b, 2, h, w, F]
         cos_feat = torch.cos(tproj)  # [b, 2, h, w, F]
 
-        # Rearrange into [b, 4F, h, w]
         sin_ch = sin_feat.permute(0, 1, 4, 2, 3).contiguous().view(batch_size, 2 * self.num_frequencies, h, w)
         cos_ch = cos_feat.permute(0, 1, 4, 2, 3).contiguous().view(batch_size, 2 * self.num_frequencies, h, w)
         fourier_ch = torch.cat([sin_ch, cos_ch], dim=1)  # [b, 4F, h, w]
@@ -359,6 +356,8 @@ class SIID(nn.Module):
         nn.init.zeros_(self.latent_to_epsilon[-2].bias)
 
         self.pos_embed = PosEmbed2d(pos_high_freq, pos_low_freq)
+        # total_pos_channels = 2 * 4 * (pos_low_freq + pos_high_freq)
+        # self.pos_proj = nn.Conv2d(total_pos_channels * rescale_factor ** 2, total_pos_channels, 1)
         self.time_embed = ContTimeEmbed(time_high_freq, time_low_freq)
         self.film_proj = nn.Sequential(
             nn.Linear(self.num_time_frequencies * 2, film_dim),
@@ -404,13 +403,17 @@ class SIID(nn.Module):
         assert image.size(-1) % self.reduction_size == 0, f"Image width must be divisible by {self.reduction_size}"
         assert image.size(-2) % self.reduction_size == 0, f"Image height must be divisible by {self.reduction_size}"
         assert image.ndim == 4, "Image must be batch, tensor shape of [B, C, H, W]"
-        b = image.size(0)
+        b, c, h, w = image.shape
 
         shuffled_image = self.pixel_unshuffle(image)
-        latent_h, latent_w = shuffled_image.size(-2), shuffled_image.size(-1)
-        rel_pos_map = self.pos_embed(b, latent_h, latent_w, True).expand(b, -1, -1, -1)  # [b, 4F, H, W]
-        abs_pos_map = self.pos_embed(b, latent_h, latent_w, False).expand(b, -1, -1, -1)  # [b, 4F, H, W]
-        stacked_latent = torch.cat([shuffled_image, rel_pos_map, abs_pos_map], dim=-3)
+
+        rel_pos_map = self.pos_embed(b, h, w, True)
+        abs_pos_map = self.pos_embed(b, h, w, False)
+        pos_map = torch.cat([rel_pos_map, abs_pos_map], dim=-3)
+        # shuffled_pos_map = self.pixel_unshuffle(pos_map)
+        # pos_cond = self.pos_proj(shuffled_pos_map)
+
+        stacked_latent = torch.cat([shuffled_image, pos_map], dim=-3)
         latent = self.proj_to_latent(stacked_latent)
 
         time_vector = self.time_embed(alpha_bar)  # [B, time_dim]
