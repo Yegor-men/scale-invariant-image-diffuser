@@ -55,7 +55,6 @@ from modules.dummy_textencoder import DummyTextCond
 model = SIID(
     c_channels=1,
     d_channels=128,
-    rescale_factor=1,
     enc_blocks=8,
     dec_blocks=8,
     num_heads=8,
@@ -373,18 +372,7 @@ for E in range(num_epochs):
         pos_text_cond = text_encoder(positive_label)
         null_text_cond = text_encoder(torch.zeros_like(positive_label))
 
-        rf = model.rescale_factor
         sizes = [
-            # (8, 8, "1:1"),
-            # (6, 9, "3:2"),
-            # (9, 6, "2:3"),
-            # (8, 6, "3:4"),
-            # (6, 8, "4:3"),
-            # (8, 10, "5:4"),
-            # (10, 8, "4:5"),
-            # (9, 16, "16:9"),
-            # (16, 9, "9:16"),
-            # (16, 16, "Double Resolution"),
             (28, 28, "1:1"),
             (18, 27, "3:2"),
             (27, 18, "2:3"),
@@ -398,7 +386,7 @@ for E in range(num_epochs):
         ]
 
         for (height, width, name) in sizes:
-            grid_noise = torch.randn(100, 1, rf * height, rf * width).to(device)
+            grid_noise = torch.randn(100, 1, height, width).to(device)
 
             final_x0_hat, final_x = run_ddim_visualization(
                 model=model,
@@ -412,7 +400,7 @@ for E in range(num_epochs):
                 eta=2.0,  # change to 1.0 for sdxl
                 render_every=1000,
                 device=torch.device("cuda"),
-                title=f"{name} - H:{rf * height}, W:{rf * width}"
+                title=f"{name} - H:{height}, W:{width}"
             )
 
     # MODEL SAVING

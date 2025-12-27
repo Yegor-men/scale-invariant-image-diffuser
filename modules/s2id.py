@@ -317,7 +317,6 @@ class SIID(nn.Module):
             self,
             c_channels: int,  # color channels
             d_channels: int,  # channels in the latent
-            rescale_factor: int,  # by how much to reduce the width and height and increase latent depth
             enc_blocks: int,  # number of encoder blocks (no cross attention)
             dec_blocks: int,  # number of decoder blocks (yes cross attention)
             num_heads: int,  # num heads in each block, d_channels must be divisible here
@@ -334,7 +333,6 @@ class SIID(nn.Module):
         super().__init__()
         self.c_channels = int(c_channels)
         self.d_channels = int(d_channels)
-        self.rescale_factor = int(rescale_factor)
         self.num_enc_blocks = int(enc_blocks)
         self.num_dec_blocks = int(dec_blocks)
         self.num_heads = int(num_heads)
@@ -342,22 +340,14 @@ class SIID(nn.Module):
         self.num_time_frequencies = int(time_low_freq + time_high_freq)
         self.film_dim = int(film_dim)
 
-        self.reduction_size = rescale_factor
-        latent_img_channels = c_channels * rescale_factor ** 2
+        self.proj_to_latent = nn.Conv2d(self.num_pos_frequencies * 4 * 2 + c_channels, d_channels, 1)
 
-        self.pixel_unshuffle = nn.PixelUnshuffle(rescale_factor)
-        self.proj_to_latent = nn.Conv2d(self.num_pos_frequencies * 4 * 2 + latent_img_channels, d_channels, 1)
+        self.latent_to_epsilon = nn.Conv2d(d_channels, c_channels, 1)
 
-        self.latent_to_epsilon = nn.Sequential(
-            nn.Conv2d(d_channels, latent_img_channels, 1),
-            nn.PixelShuffle(rescale_factor)
-        )
         nn.init.zeros_(self.latent_to_epsilon[-2].weight)
         nn.init.zeros_(self.latent_to_epsilon[-2].bias)
 
         self.pos_embed = PosEmbed2d(pos_high_freq, pos_low_freq)
-        # total_pos_channels = 2 * 4 * (pos_low_freq + pos_high_freq)
-        # self.pos_proj = nn.Conv2d(total_pos_channels * rescale_factor ** 2, total_pos_channels, 1)
         self.time_embed = ContTimeEmbed(time_high_freq, time_low_freq)
         self.film_proj = nn.Sequential(
             nn.Linear(self.num_time_frequencies * 2, film_dim),
@@ -400,12 +390,10 @@ class SIID(nn.Module):
         print(f"Channels for color/positioning: {total_col_channels}/{total_pos_channels}, total: {total_channels}")
 
     def forward(self, image: torch.Tensor, alpha_bar: torch.Tensor, text_conds: list[torch.Tensor]):
-        assert image.size(-1) % self.reduction_size == 0, f"Image width must be divisible by {self.reduction_size}"
-        assert image.size(-2) % self.reduction_size == 0, f"Image height must be divisible by {self.reduction_size}"
+        # assert image.size(-1) % self.reduction_size == 0, f"Image width must be divisible by {self.reduction_size}"
+        # assert image.size(-2) % self.reduction_size == 0, f"Image height must be divisible by {self.reduction_size}"
         assert image.ndim == 4, "Image must be batch, tensor shape of [B, C, H, W]"
         b, c, h, w = image.shape
-
-        shuffled_image = self.pixel_unshuffle(image)
 
         rel_pos_map = self.pos_embed(b, h, w, True)
         abs_pos_map = self.pos_embed(b, h, w, False)
@@ -413,7 +401,7 @@ class SIID(nn.Module):
         # shuffled_pos_map = self.pixel_unshuffle(pos_map)
         # pos_cond = self.pos_proj(shuffled_pos_map)
 
-        stacked_latent = torch.cat([shuffled_image, pos_map], dim=-3)
+        stacked_latent = torch.cat([image, pos_map], dim=-3)
         latent = self.proj_to_latent(stacked_latent)
 
         time_vector = self.time_embed(alpha_bar)  # [B, time_dim]

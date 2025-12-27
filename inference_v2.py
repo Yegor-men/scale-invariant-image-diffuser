@@ -11,7 +11,6 @@ from modules.dummy_textencoder import DummyTextCond
 model = SIID(
     c_channels=1,
     d_channels=128,
-    rescale_factor=1,
     enc_blocks=8,
     dec_blocks=8,
     num_heads=8,
@@ -52,7 +51,6 @@ with torch.no_grad():
     pos_text_cond = text_encoder(positive_label)
     null_text_cond = text_encoder(torch.zeros_like(positive_label))
 
-    rf = model.rescale_factor
     sizes = [
         # (128, 128, "SDXL 1MP")  # need to change the positive label code above to fit batch size 10 for memory
         # (8, 8, "1:1"),
@@ -75,7 +73,7 @@ with torch.no_grad():
             pos_text_cond = text_encoder(thing)
             null_text_cond = text_encoder(torch.zeros_like(thing))
 
-            grid_noise = torch.randn(1, 1, rf * height, rf * width).to(device)  # change 100 to 10 for the sdxl 1mp
+            grid_noise = torch.randn(1, 1, height, width).to(device)  # change 100 to 10 for the sdxl 1mp
 
             final_x0_hat, final_x = run_ddim_visualization(
                 model=model,
@@ -89,5 +87,5 @@ with torch.no_grad():
                 eta=1.0,
                 render_every=1,
                 device=torch.device("cuda"),
-                title=f"{name} - H:{rf * height}, W:{rf * width}"
+                title=f"{name} - H:{height}, W:{width}"
             )
